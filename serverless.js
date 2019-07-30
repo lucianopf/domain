@@ -71,7 +71,7 @@ class Domain extends Component {
         this.context.debug(`Creating a new AWS ACM Certificate for the domain: ${inputs.domain}.`)
         certificate = await createCertificate(clients.acm, inputs.domain)
       }
-      certificate = await describeCertificateByArn(clients.acm, certificateArn)
+      certificate = await describeCertificateByArn(clients.acm, certificate.CertificateArn)
       this.state.awsAcmCertificateArn = certificate.CertificateArn
       await this.save()
     }

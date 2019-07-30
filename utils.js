@@ -148,6 +148,7 @@ const createCertificate = async (acm, domain) => {
 const validateCertificate = async (acm, route53, certificate, domain, domainHostedZoneId) => {
 
    let readinessCheckCount = 10
+   let statusCheckCount = 10
    let validationResourceRecord
 
    /**
@@ -163,10 +164,10 @@ const validateCertificate = async (acm, route53, certificate, domain, domainHost
       throw new Error('Your newly created AWS ACM Certificate is taking a while to initialize.  Please try running this component again in a few minutes.')
     }
 
-    certificate = await describeCertificateByArn(acm, certificate.CertificateArn)
+    let cert = await describeCertificateByArn(acm, certificate.CertificateArn)
 
     // Find root domain validation option resource record
-    certificate.DomainValidationOptions.forEach((option) => {
+    cert.DomainValidationOptions.forEach((option) => {
       if (domain === option.DomainName) {
         validationResourceRecord = option.ResourceRecord
       }
@@ -216,6 +217,29 @@ const validateCertificate = async (acm, route53, certificate, domain, domainHost
     }
     await route53.changeResourceRecordSets(recordParams).promise()
   }
+
+  /**
+   * Check Validated Status
+   * - Newly Validated AWS ACM Certificates may not yet show up as valid
+   * - This gives them some time to update their status.
+   */
+
+  const checkStatus = async function () {
+
+    if (statusCheckCount < 1) {
+      throw new Error('Your newly validated AWS ACM Certificate is taking a while to register as valid.  Please try running this component again in a few minutes.')
+    }
+
+    let cert = await describeCertificateByArn(acm, certificate.CertificateArn)
+
+    if (cert.Status !== 'ISSUED') {
+      statusCheckCount--
+      await utils.sleep(10000)
+      return await checkStatus()
+    }
+  }
+
+  await checkStatus()
 }
 
 /**
