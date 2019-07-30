@@ -40,37 +40,42 @@ const getClients = (credentials, region = 'us-east-1') => {
  * - Formats component domains & identifies cloud services they're using.
  */
 
-const prepareDomains = (config) => {
-  const domains = []
+const prepareSubdomains = (inputs) => {
+  const subdomains = []
 
-  for (const subdomain in config.dns || []) {
+  for (const subdomain in inputs.subdomains || {}) {
     const domainObj = {}
 
-    if (subdomain === '$') {
-      domainObj.domain = config.domain
-      domainObj.root = true
-    } else {
-      domainObj.domain = `${subdomain}.${config.domain}`
+    domainObj.domain = `${subdomain}.${inputs.domain}`
+
+    if (inputs.subdomains[subdomain].url.includes('s3')) {
+      domainObj.type = 'awsS3Website'
+      // Get S3 static hosting endpoint of existing bucket to use w/ CloudFront.
+      // todo this doesn't work with bucket names with periods
+      domainObj.s3BucketName = inputs.subdomains[subdomain].url.replace('http://', '').split('.')[0]
     }
 
     // Check if referenced Component is using AWS API Gateway...
-    if (config.dns[subdomain].url.includes('execute-api')) {
-      const id = domain.target.url.split('.')[0].split('//')[1]
-      domainObj.id = id
+    if (inputs.subdomains[subdomain].url.includes('execute-api')) {
+      domainObj.apiId = inputs.subdomains[subdomain].url.split('.')[0].split('//')[1]
       domainObj.type = 'awsApiGateway'
     }
 
-    if (config.dns[subdomain].url.includes('s3')) {
-      domainObj.type = 'awsS3Website'
-      // Get S3 static hosting endpoint of existing bucket to use w/ CloudFront.
-      // The bucket name must be DNS compliant.
-      domainObj.s3BucketName = config.dns[subdomain].url.replace('http://', '').split('.')[0]
-    }
-
-    domains.push(domainObj)
+    subdomains.push(domainObj)
   }
 
-  return domains
+  return subdomains
+}
+
+const getOutdatedDomains = (inputs, state) => {
+  if (inputs.domain !== state.domain) {
+    return state
+  }
+
+  for (const domain of Object.keys(state.dns)) {
+    if (!inputs.dns[domain]) {
+    }
+  }
 }
 
 /**
@@ -94,7 +99,7 @@ const getDomainHostedZoneId = async (route53, domain) => {
     )
   }
 
-  return hostedZone.Id.replace('/hostedzone/', '')
+  return hostedZone.Id.replace('/hostedzone/', '') // hosted zone id is always prefixed with this :(
 }
 
 /**
@@ -103,9 +108,7 @@ const getDomainHostedZoneId = async (route53, domain) => {
  */
 
 const describeCertificateByArn = async (acm, certificateArn) => {
-  let certificate = await acm
-    .describeCertificate({ CertificateArn: certificateArn })
-    .promise()
+  const certificate = await acm.describeCertificate({ CertificateArn: certificateArn }).promise()
   return certificate && certificate.Certificate ? certificate.Certificate : null
 }
 
@@ -116,9 +119,7 @@ const describeCertificateByArn = async (acm, certificateArn) => {
 
 const getCertificateArnByDomain = async (acm, domain) => {
   const listRes = await acm.listCertificates().promise()
-  let certificate = listRes.CertificateSummaryList.find(
-    (cert) => cert.DomainName === domain
-  )
+  const certificate = listRes.CertificateSummaryList.find((cert) => cert.DomainName === domain)
   return certificate && certificate.CertificateArn ? certificate.CertificateArn : null
 }
 
@@ -128,16 +129,17 @@ const getCertificateArnByDomain = async (acm, domain) => {
  */
 
 const createCertificate = async (acm, domain) => {
-
   const wildcardSubDomain = `*.${domain}`
 
   const params = {
     DomainName: domain,
-    SubjectAlternativeNames: [ domain, wildcardSubDomain ],
+    SubjectAlternativeNames: [domain, wildcardSubDomain],
     ValidationMethod: 'DNS'
   }
 
-  return await acm.requestCertificate(params).promise()
+  const res = await acm.requestCertificate(params).promise()
+
+  return res.CertificateArn
 }
 
 /**
@@ -146,25 +148,25 @@ const createCertificate = async (acm, domain) => {
  */
 
 const validateCertificate = async (acm, route53, certificate, domain, domainHostedZoneId) => {
+  let readinessCheckCount = 16
+  let statusCheckCount = 16
+  let validationResourceRecord
 
-   let readinessCheckCount = 10
-   let statusCheckCount = 10
-   let validationResourceRecord
+  /**
+   * Check Readiness
+   * - Newly Created AWS ACM Certificates may not yet have the info needed to validate it
+   * - Specifically, the "ResourceRecord" object in the Domain Validation Options
+   * - Ensure this exists.
+   */
 
-   /**
-    * Check Readiness
-    * - Newly Created AWS ACM Certificates may not yet have the info needed to validate it
-    * - Specifically, the "ResourceRecord" object in the Domain Validation Options
-    * - Ensure this exists.
-    */
-
-   const checkReadiness = async function () {
-
+  const checkReadiness = async function() {
     if (readinessCheckCount < 1) {
-      throw new Error('Your newly created AWS ACM Certificate is taking a while to initialize.  Please try running this component again in a few minutes.')
+      throw new Error(
+        'Your newly created AWS ACM Certificate is taking a while to initialize.  Please try running this component again in a few minutes.'
+      )
     }
 
-    let cert = await describeCertificateByArn(acm, certificate.CertificateArn)
+    const cert = await describeCertificateByArn(acm, certificate.CertificateArn)
 
     // Find root domain validation option resource record
     cert.DomainValidationOptions.forEach((option) => {
@@ -182,15 +184,15 @@ const validateCertificate = async (acm, route53, certificate, domain, domainHost
 
   await checkReadiness()
 
-  let checkRecordsParams = {
+  const checkRecordsParams = {
     HostedZoneId: domainHostedZoneId,
     MaxItems: '10',
-    StartRecordName: validationResourceRecord.Name,
+    StartRecordName: validationResourceRecord.Name
   }
 
   // Check if the validation resource record sets already exist.
   // This might be the case if the user is trying to deploy multiple times while validation is occurring.
-  let existingRecords = await route53.listResourceRecordSets(checkRecordsParams).promise()
+  const existingRecords = await route53.listResourceRecordSets(checkRecordsParams).promise()
 
   if (!existingRecords.ResourceRecordSets.length) {
     // Create CNAME record for DNS validation check
@@ -224,13 +226,14 @@ const validateCertificate = async (acm, route53, certificate, domain, domainHost
    * - This gives them some time to update their status.
    */
 
-  const checkStatus = async function () {
-
+  const checkStatus = async function() {
     if (statusCheckCount < 1) {
-      throw new Error('Your newly validated AWS ACM Certificate is taking a while to register as valid.  Please try running this component again in a few minutes.')
+      throw new Error(
+        'Your newly validated AWS ACM Certificate is taking a while to register as valid.  Please try running this component again in a few minutes.'
+      )
     }
 
-    let cert = await describeCertificateByArn(acm, certificate.CertificateArn)
+    const cert = await describeCertificateByArn(acm, certificate.CertificateArn)
 
     if (cert.Status !== 'ISSUED') {
       statusCheckCount--
@@ -245,21 +248,39 @@ const validateCertificate = async (acm, route53, certificate, domain, domainHost
 /**
  * Create AWS API Gateway Domain
  */
-
-const createApigDomain = async (apig, route53, domain, certificateArn, domainHostedZoneId) => {
-  const params = {
-    domainName: domain,
-    certificateArn: certificateArn,
-    securityPolicy: 'TLS_1_2',
-    endpointConfiguration: {
-      types: ['EDGE']
+const createDomainInApig = async (apig, domain, certificateArn) => {
+  try {
+    const params = {
+      domainName: domain,
+      certificateArn: certificateArn,
+      securityPolicy: 'TLS_1_2',
+      endpointConfiguration: {
+        types: ['EDGE']
+      }
     }
+    const res = await apig.createDomainName(params).promise()
+    return res
+  } catch (e) {
+    if (e.code === 'TooManyRequestsException') {
+      await utils.sleep(2000)
+      return createDomainInApig(apig, domain, certificateArn)
+    }
+    throw e
   }
+}
 
-  const apigDomainName = await apig.createDomainName(params).promise()
-
+/**
+ * Configure DNS for the created API Gateway domain
+ */
+const configureDnsForApigDomain = async (
+  route53,
+  domain,
+  hostedZoneId,
+  distributionHostedZoneId,
+  distributionDomainName
+) => {
   const dnsRecord = {
-    HostedZoneId: domainHostedZoneId,
+    HostedZoneId: hostedZoneId,
     ChangeBatch: {
       Changes: [
         {
@@ -268,8 +289,8 @@ const createApigDomain = async (apig, route53, domain, certificateArn, domainHos
             Name: domain,
             Type: 'A',
             AliasTarget: {
-              HostedZoneId: apigDomainName.distributionHostedZoneId,
-              DNSName: apigDomainName.distributionDomainName,
+              HostedZoneId: distributionHostedZoneId,
+              DNSName: distributionDomainName,
               EvaluateTargetHealth: false
             }
           }
@@ -282,37 +303,62 @@ const createApigDomain = async (apig, route53, domain, certificateArn, domainHos
 }
 
 /**
- * Deploy AWS API Gateway Domain
+ * Map API Gateway API to the created API Gateway Domain
  */
+const mapDomainToApi = async (apig, domain, apiId) => {
+  try {
+    const params = {
+      domainName: domain,
+      restApiId: apiId,
+      basePath: '(none)',
+      stage: 'production'
+    }
+    // todo what if it already exists but for a different apiId
+    return apig.createBasePathMapping(params).promise()
+  } catch (e) {
+    if (e.code === 'TooManyRequestsException') {
+      await utils.sleep(2000)
+      return mapDomainToApi(apig, domain, apiId)
+    }
+    throw e
+  }
+}
 
 const deployApiDomain = async (
   apig,
   route53,
-  domain,
-  apiId,
+  subdomain,
   certificateArn,
-  domainHostedZoneId
+  domainHostedZoneId,
+  that
 ) => {
   try {
-    await apig
-      .createBasePathMapping({
-        domainName: domain,
-        restApiId: apiId,
-        basePath: '(none)',
-        stage: 'production'
-      })
-      .promise()
+    that.context.debug(`Mapping domain ${subdomain.domain} to API ID ${subdomain.apiId}`)
+    await mapDomainToApi(apig, subdomain.domain, subdomain.apiId)
   } catch (e) {
     if (e.message === 'Invalid domain name identifier specified') {
-      await createApigDomain(apig, route53, domain, certificateArn, domainHostedZoneId)
+      that.context.debug(`Domain ${subdomain.domain} not found in API Gateway. Creating...`)
 
-      // avoiding "too many requests error"
-      await utils.sleep(1000)
+      const res = await createDomainInApig(apig, subdomain.domain, certificateArn)
 
-      return deployApiDomain(apig, route53, domain, apiId, certificateArn, domainHostedZoneId)
+      that.context.debug(`Configuring DNS for API Gateway domain ${subdomain.domain}.`)
+
+      await configureDnsForApigDomain(
+        route53,
+        subdomain.domain,
+        domainHostedZoneId,
+        res.distributionHostedZoneId,
+        res.distributionDomainName
+      )
+
+      // retry domain deployment now that domain is created
+      return deployApiDomain(apig, route53, subdomain, certificateArn, domainHostedZoneId, that)
     }
 
     if (e.message === 'Base path already exists for this domain name') {
+      that.context.debug(
+        `Domain ${subdomain.domain} is already mapped to API ID ${subdomain.apiId}.`
+      )
       return
     }
     throw new Error(e)
@@ -320,184 +366,246 @@ const deployApiDomain = async (
 }
 
 /**
- * Get CloudFront Distribution
+ * Get CloudFront Distribution using a domain name
  */
 
-const getCloudfrontDistribution = async (cf, distributionId) => {
-  const params = {
-    Id: distributionId
+const getCloudFrontDistributionByDomain = async (cf, domain) => {
+  const listRes = await cf.listDistributions({}).promise()
+
+  const distribution = listRes.DistributionList.Items.find((dist) =>
+    dist.Aliases.Items.includes(domain)
+  )
+
+  if (distribution) {
+    return {
+      arn: distribution.ARN,
+      id: distribution.Id,
+      url: distribution.DomainName,
+      origins: distribution.Origins.Items.map((origin) => origin.DomainName)
+    }
   }
-  let distribution = await cf.getDistribution(params).promise()
-  return distribution
+
+  return null
+}
+
+/**
+ * Configure DNS records for a distribution domain
+ */
+const configureDnsForCloudFrontDistribution = async (
+  route53,
+  subdomain,
+  domainHostedZoneId,
+  distributionUrl
+) => {
+  const dnsRecordParams = {
+    HostedZoneId: domainHostedZoneId,
+    ChangeBatch: {
+      Changes: [
+        {
+          Action: 'UPSERT',
+          ResourceRecordSet: {
+            Name: subdomain.domain,
+            Type: 'A',
+            AliasTarget: {
+              HostedZoneId: 'Z2FDTNDATAQYW2', // this is a constant that you can get from here https://docs.aws.amazon.com/general/latest/gr/rande.html#s3_region
+              DNSName: distributionUrl,
+              EvaluateTargetHealth: false
+            }
+          }
+        }
+      ]
+    }
+  }
+
+  if (subdomain.domain.startsWith('www')) {
+    dnsRecordParams.ChangeBatch.Changes.push({
+      Action: 'UPSERT',
+      ResourceRecordSet: {
+        Name: subdomain.domain.replace('www.', ''),
+        Type: 'A',
+        AliasTarget: {
+          HostedZoneId: 'Z2FDTNDATAQYW2', // this is a constant that you can get from here https://docs.aws.amazon.com/general/latest/gr/rande.html#s3_region
+          DNSName: distributionUrl,
+          EvaluateTargetHealth: false
+        }
+      }
+    })
+  }
+
+  return route53.changeResourceRecordSets(dnsRecordParams).promise()
 }
 
 /**
  * Create Cloudfront Distribution
  */
 
-const createCloudfrontDistribution = async (route53, cf, domainConfig, domainHostedZoneId, certificateArn) => {
-  try {
-    const params = {
-      DistributionConfig: {
-        CallerReference: String(Date.now()),
-        Aliases: {
-          Quantity: 1,
-          Items: [ domainConfig.domain ]
-        },
-        DefaultRootObject: 'index.html',
-        Origins: {
-          Quantity: 1,
-          Items: [
-            {
-              Id: `S3-${domainConfig.s3BucketName}`,
-              DomainName: `${domainConfig.s3BucketName}.s3.amazonaws.com`,
-              OriginPath: '',
-              CustomHeaders: {
-                Quantity: 0,
-                Items: []
-              },
-              S3OriginConfig: {
-                OriginAccessIdentity: ''
-              }
-            }
-          ]
-        },
-        OriginGroups: {
-          Quantity: 0,
-          Items: []
-        },
-        DefaultCacheBehavior: {
-          TargetOriginId: `S3-${domainConfig.s3BucketName}`,
-          ForwardedValues: {
-            QueryString: false,
-            Cookies: {
-              Forward: 'none'
-            },
-            Headers: {
-              Quantity: 0,
-              Items: []
-            },
-            QueryStringCacheKeys: {
-              Quantity: 0,
-              Items: []
-            }
-          },
-          TrustedSigners: {
-            Enabled: false,
-            Quantity: 0,
-            Items: []
-          },
-          ViewerProtocolPolicy: 'redirect-to-https',
-          MinTTL: 0,
-          AllowedMethods: {
-            Quantity: 2,
-            Items: ['HEAD', 'GET'],
-            CachedMethods: {
-              Quantity: 2,
-              Items: ['HEAD', 'GET']
-            }
-          },
-          SmoothStreaming: false,
-          DefaultTTL: 86400,
-          MaxTTL: 31536000,
-          Compress: false,
-          LambdaFunctionAssociations: {
-            Quantity: 0,
-            Items: []
-          },
-          FieldLevelEncryptionId: ''
-        },
-        CacheBehaviors: {
-          Quantity: 0,
-          Items: []
-        },
-        CustomErrorResponses: {
-          Quantity: 0,
-          Items: []
-        },
-        Comment: '',
-        Logging: {
-          Enabled: false,
-          IncludeCookies: false,
-          Bucket: '',
-          Prefix: ''
-        },
-        PriceClass: 'PriceClass_All',
-        Enabled: true,
-        ViewerCertificate: {
-          ACMCertificateArn: certificateArn,
-          SSLSupportMethod: 'sni-only',
-          MinimumProtocolVersion: 'TLSv1.1_2016',
-          Certificate: certificateArn,
-          CertificateSource: 'acm'
-        },
-        Restrictions: {
-          GeoRestriction: {
-            RestrictionType: 'none',
-            Quantity: 0,
-            Items: []
-          }
-        },
-        WebACLId: '',
-        HttpVersion: 'http2',
-        IsIPV6Enabled: true
-      }
-    }
-
-    let res = await cf.createDistribution(params).promise()
-    res = res.Distribution
-
-    const distributionId = res.Id
-    const distributionArn = res.ARN
-    const distributionUrl = res.DomainName
-
-    const dnsRecordParams = {
-      HostedZoneId: domainHostedZoneId,
-      ChangeBatch: {
-        Changes: [
+const createCloudfrontDistribution = async (cf, subdomain, certificateArn) => {
+  const params = {
+    DistributionConfig: {
+      CallerReference: String(Date.now()),
+      Aliases: {
+        Quantity: 1,
+        Items: [subdomain.domain]
+      },
+      DefaultRootObject: 'index.html',
+      Origins: {
+        Quantity: 1,
+        Items: [
           {
-            Action: 'UPSERT',
-            ResourceRecordSet: {
-              Name: domainConfig.domain,
-              Type: 'A',
-              AliasTarget: {
-                HostedZoneId: 'Z2FDTNDATAQYW2', // this is a constant that you can get from here https://docs.aws.amazon.com/general/latest/gr/rande.html#s3_region
-                DNSName: distributionUrl,
-                EvaluateTargetHealth: false
-              }
+            Id: `S3-${subdomain.s3BucketName}`,
+            DomainName: `${subdomain.s3BucketName}.s3.amazonaws.com`,
+            OriginPath: '',
+            CustomHeaders: {
+              Quantity: 0,
+              Items: []
+            },
+            S3OriginConfig: {
+              OriginAccessIdentity: ''
             }
           }
         ]
+      },
+      OriginGroups: {
+        Quantity: 0,
+        Items: []
+      },
+      DefaultCacheBehavior: {
+        TargetOriginId: `S3-${subdomain.s3BucketName}`,
+        ForwardedValues: {
+          QueryString: false,
+          Cookies: {
+            Forward: 'none'
+          },
+          Headers: {
+            Quantity: 0,
+            Items: []
+          },
+          QueryStringCacheKeys: {
+            Quantity: 0,
+            Items: []
+          }
+        },
+        TrustedSigners: {
+          Enabled: false,
+          Quantity: 0,
+          Items: []
+        },
+        ViewerProtocolPolicy: 'redirect-to-https',
+        MinTTL: 0,
+        AllowedMethods: {
+          Quantity: 2,
+          Items: ['HEAD', 'GET'],
+          CachedMethods: {
+            Quantity: 2,
+            Items: ['HEAD', 'GET']
+          }
+        },
+        SmoothStreaming: false,
+        DefaultTTL: 86400,
+        MaxTTL: 31536000,
+        Compress: false,
+        LambdaFunctionAssociations: {
+          Quantity: 0,
+          Items: []
+        },
+        FieldLevelEncryptionId: ''
+      },
+      CacheBehaviors: {
+        Quantity: 0,
+        Items: []
+      },
+      CustomErrorResponses: {
+        Quantity: 0,
+        Items: []
+      },
+      Comment: '',
+      Logging: {
+        Enabled: false,
+        IncludeCookies: false,
+        Bucket: '',
+        Prefix: ''
+      },
+      PriceClass: 'PriceClass_All',
+      Enabled: true,
+      ViewerCertificate: {
+        ACMCertificateArn: certificateArn,
+        SSLSupportMethod: 'sni-only',
+        MinimumProtocolVersion: 'TLSv1.1_2016',
+        Certificate: certificateArn,
+        CertificateSource: 'acm'
+      },
+      Restrictions: {
+        GeoRestriction: {
+          RestrictionType: 'none',
+          Quantity: 0,
+          Items: []
+        }
+      },
+      WebACLId: '',
+      HttpVersion: 'http2',
+      IsIPV6Enabled: true
+    }
+  }
+
+  if (subdomain.domain.startsWith('www')) {
+    params.DistributionConfig.Aliases.Quantity = 2
+    params.DistributionConfig.Aliases.Items.push(`${subdomain.domain.replace('www.', '')}`)
+  }
+
+  const res = await cf.createDistribution(params).promise()
+
+  return {
+    id: res.Distribution.Id,
+    arn: res.Distribution.ARN,
+    url: res.Distribution.DomainName
+  }
+}
+
+/*
+ * Updates a distribution's origins
+ */
+
+const updateCloudfrontDistribution = async (cf, subdomain, distributionId) => {
+  // Update logic is a bit weird...
+  // https://docs.aws.amazon.com/AWSJavaScriptSDK/latest/AWS/CloudFront.html#updateDistribution-property
+
+  // 1. we gotta get the config first...
+  const params = await cf.getDistributionConfig({ Id: distributionId }).promise()
+
+  // 2. then add this property
+  params.IfMatch = params.ETag
+
+  // 3. then delete this property
+  delete params.ETag
+
+  // 4. then set this property
+  params.Id = distributionId
+
+  // 5. then make our changes
+  params.DistributionConfig.Origins.Items = [
+    {
+      Id: `S3-${subdomain.s3BucketName}`,
+      DomainName: `${subdomain.s3BucketName}.s3.amazonaws.com`,
+      OriginPath: '',
+      CustomHeaders: {
+        Quantity: 0,
+        Items: []
+      },
+      S3OriginConfig: {
+        OriginAccessIdentity: ''
       }
     }
+  ]
 
-    if (domainConfig.root) {
-      dnsRecordParams.ChangeBatch.Changes.push({
-        Action: 'UPSERT',
-        ResourceRecordSet: {
-          Name: `www.${domainConfig.domain}`,
-          Type: 'A',
-          AliasTarget: {
-            HostedZoneId: 'Z2FDTNDATAQYW2', // this is a constant that you can get from here https://docs.aws.amazon.com/general/latest/gr/rande.html#s3_region
-            DNSName: distributionUrl,
-            EvaluateTargetHealth: false
-          }
-        }
-      })
-    }
+  params.DistributionConfig.DefaultCacheBehavior.TargetOriginId = `S3-${subdomain.s3BucketName}`
 
-    await route53.changeResourceRecordSets(dnsRecordParams).promise()
+  // 6. then finally update!
+  const res = await cf.updateDistribution(params).promise()
 
-    return {
-      distributionId,
-      distributionArn,
-      distributionUrl,
-    }
-
-  } catch (e) {
-    if (e.code !== 'CNAMEAlreadyExists') {
-      throw e
-    }
+  return {
+    id: res.Distribution.Id,
+    arn: res.Distribution.ARN,
+    url: res.Distribution.DomainName
   }
 }
 
@@ -512,9 +620,7 @@ const invalidateCloudfrontDistribution = async (cf, distributionId) => {
       CallerReference: String(Date.now()),
       Paths: {
         Quantity: 1,
-        Items: [
-          '/index.html',
-        ]
+        Items: ['/index.html']
       }
     }
   }
@@ -522,11 +628,15 @@ const invalidateCloudfrontDistribution = async (cf, distributionId) => {
 }
 
 /**
- * Remove AWS S3 Website Resources
+ * Remove AWS S3 Website DNS Records
  */
 
-const removeAwsS3WebsiteResources = async (route53, cf, domainHostedZoneId, domain, distributionId, distributionUrl) => {
-
+const removeWebsiteDomainDnsRecords = async (
+  route53,
+  domain,
+  domainHostedZoneId,
+  distributionUrl
+) => {
   const params = {
     HostedZoneId: domainHostedZoneId,
     ChangeBatch: {
@@ -546,26 +656,97 @@ const removeAwsS3WebsiteResources = async (route53, cf, domainHostedZoneId, doma
       ]
     }
   }
-  await route53.changeResourceRecordSets(params).promise()
-
+  try {
+    await route53.changeResourceRecordSets(params).promise()
+  } catch (e) {
+    if (e.code !== 'InvalidChangeBatch') {
+      throw e
+    }
+  }
 }
 
+/**
+ * Remove API Gateway Domain
+ */
 
+const removeApiDomain = async (apig, domain) => {
+  const params = {
+    domainName: domain
+  }
+
+  return apig.deleteDomainName(params).promise()
+}
+
+/**
+ * Remove API Gateway Domain DNS Records
+ */
+
+const removeApiDomainDnsRecords = async (
+  route53,
+  domain,
+  domainHostedZoneId,
+  distributionHostedZoneId,
+  distributionDomainName
+) => {
+  const dnsRecord = {
+    HostedZoneId: domainHostedZoneId,
+    ChangeBatch: {
+      Changes: [
+        {
+          Action: 'DELETE',
+          ResourceRecordSet: {
+            Name: domain,
+            Type: 'A',
+            AliasTarget: {
+              HostedZoneId: distributionHostedZoneId,
+              DNSName: distributionDomainName,
+              EvaluateTargetHealth: false
+            }
+          }
+        }
+      ]
+    }
+  }
+
+  return route53.changeResourceRecordSets(dnsRecord).promise()
+}
+
+/**
+ * Fetch API Gateway Domain Information
+ */
+
+const getApiDomainName = async (apig, domain) => {
+  try {
+    return apig.getDomainName({ domainName: domain }).promise()
+  } catch (e) {
+    if (e.code === 'NotFoundException:') {
+      return null
+    }
+  }
+}
 /**
  * Exports
  */
 
 module.exports = {
   getClients,
-  prepareDomains,
+  prepareSubdomains,
   describeCertificateByArn,
   getCertificateArnByDomain,
   createCertificate,
   validateCertificate,
   getDomainHostedZoneId,
   createCloudfrontDistribution,
-  getCloudfrontDistribution,
+  updateCloudfrontDistribution,
   invalidateCloudfrontDistribution,
+  mapDomainToApi,
+  createDomainInApig,
+  configureDnsForApigDomain,
   deployApiDomain,
-  removeAwsS3WebsiteResources,
+  removeApiDomain,
+  removeApiDomainDnsRecords,
+  getCloudFrontDistributionByDomain,
+  configureDnsForCloudFrontDistribution,
+  getApiDomainName,
+  removeWebsiteDomainDnsRecords
 }
