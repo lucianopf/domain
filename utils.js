@@ -6,7 +6,7 @@ const { utils } = require('@serverless/core')
  * - Gets AWS SDK clients to use within this Component
  */
 
-const getClients = (credentials, region) => {
+const getClients = (credentials, region = 'us-east-1') => {
   const route53 = new aws.Route53({
     credentials,
     region
@@ -43,26 +43,28 @@ const getClients = (credentials, region) => {
 const prepareDomains = (config) => {
   const domains = []
 
-  for (const domain of config.dns || []) {
+  for (const subdomain in config.dns || []) {
     const domainObj = {}
-    if (domain.domain === 'root') {
+
+    if (subdomain === '$') {
       domainObj.domain = config.domain
+      domainObj.root = true
     } else {
-      domainObj.domain = `${domain.domain}.${config.domain}`
+      domainObj.domain = `${subdomain}.${config.domain}`
     }
 
     // Check if referenced Component is using AWS API Gateway...
-    if (domain.target.url.includes('execute-api')) {
+    if (config.dns[subdomain].url.includes('execute-api')) {
       const id = domain.target.url.split('.')[0].split('//')[1]
       domainObj.id = id
       domainObj.type = 'awsApiGateway'
     }
 
-    if (domain.target.url.includes('s3')) {
-      domainObj.type = 'awsS3'
+    if (config.dns[subdomain].url.includes('s3')) {
+      domainObj.type = 'awsS3Website'
       // Get S3 static hosting endpoint of existing bucket to use w/ CloudFront.
       // The bucket name must be DNS compliant.
-      domainObj.s3BucketName = domain.target.url.replace('http://', '').split('.')[0]
+      domainObj.s3BucketName = config.dns[subdomain].url.replace('http://', '').split('.')[0]
     }
 
     domains.push(domainObj)
@@ -78,28 +80,21 @@ const prepareDomains = (config) => {
  * - These don't need to be created and SHOULD NOT be modified.
  */
 
-const getDomainHostedZoneId = async (route53, secondLevelDomain) => {
+const getDomainHostedZoneId = async (route53, domain) => {
   const hostedZonesRes = await route53.listHostedZonesByName().promise()
 
   const hostedZone = hostedZonesRes.HostedZones.find(
     // Name has a period at the end, so we're using includes rather than equals
-    (zone) => zone.Name.includes(secondLevelDomain)
+    (zone) => zone.Name.includes(domain)
   )
 
   if (!hostedZone) {
     throw Error(
-      `Domain ${secondLevelDomain} was not found in your AWS account. Please purchase it from Route53 first then try again.`
+      `Domain ${domain} was not found in your AWS account. Please purchase it from Route53 first then try again.`
     )
   }
 
   return hostedZone.Id.replace('/hostedzone/', '')
-}
-
-const getSecondLevelDomain = (domain) => {
-  return domain
-    .split('.')
-    .slice(domain.split('.').length - 2)
-    .join('.')
 }
 
 /**
@@ -452,6 +447,21 @@ const createCloudfrontDistribution = async (route53, cf, domainConfig, domainHos
       }
     }
 
+    if (domainConfig.root) {
+      dnsRecordParams.ChangeBatch.Changes.push({
+        Action: 'UPSERT',
+        ResourceRecordSet: {
+          Name: `www.${domainConfig.domain}`,
+          Type: 'A',
+          AliasTarget: {
+            HostedZoneId: 'Z2FDTNDATAQYW2', // this is a constant that you can get from here https://docs.aws.amazon.com/general/latest/gr/rande.html#s3_region
+            DNSName: distributionUrl,
+            EvaluateTargetHealth: false
+          }
+        }
+      })
+    }
+
     await route53.changeResourceRecordSets(dnsRecordParams).promise()
 
     return {
@@ -488,6 +498,36 @@ const invalidateCloudfrontDistribution = async (cf, distributionId) => {
 }
 
 /**
+ * Remove AWS S3 Website Resources
+ */
+
+const removeAwsS3WebsiteResources = async (route53, cf, domainHostedZoneId, domain, distributionId, distributionUrl) => {
+
+  const params = {
+    HostedZoneId: domainHostedZoneId,
+    ChangeBatch: {
+      Changes: [
+        {
+          Action: 'DELETE',
+          ResourceRecordSet: {
+            Name: domain,
+            Type: 'A',
+            AliasTarget: {
+              HostedZoneId: 'Z2FDTNDATAQYW2', // this is a constant that you can get from here https://docs.aws.amazon.com/general/latest/gr/rande.html#s3_region
+              DNSName: distributionUrl,
+              EvaluateTargetHealth: false
+            }
+          }
+        }
+      ]
+    }
+  }
+  await route53.changeResourceRecordSets(params).promise()
+
+}
+
+
+/**
  * Exports
  */
 
@@ -498,10 +538,10 @@ module.exports = {
   getCertificateArnByDomain,
   createCertificate,
   validateCertificate,
-  getSecondLevelDomain,
   getDomainHostedZoneId,
   createCloudfrontDistribution,
   getCloudfrontDistribution,
   invalidateCloudfrontDistribution,
   deployApiDomain,
+  removeAwsS3WebsiteResources,
 }

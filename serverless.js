@@ -10,7 +10,8 @@ const {
   createCloudfrontDistribution,
   getCloudfrontDistribution,
   invalidateCloudfrontDistribution,
-  deployApiDomain
+  deployApiDomain,
+  removeAwsS3WebsiteResources,
 } = require('./utils')
 
 class Domain extends Component {
@@ -21,7 +22,7 @@ class Domain extends Component {
 
   async default(inputs = {}) {
     this.context.status('Deploying')
-    this.context.debug(`Starting Domain component.`)
+    this.context.debug(`Starting Domain component deployment.`)
 
     this.context.debug(`Validating inputs.`)
     inputs.region = inputs.region || 'us-east-1'
@@ -29,8 +30,15 @@ class Domain extends Component {
       throw Error(`"domain" is a required input.`)
     }
 
+    // TODO: Check if domain has changed.
+    // On domain change, call remove for all previous state.
+
+    // Save domain
+    this.state.domain = inputs.domain
+    await this.save()
+
     // Get AWS SDK Clients
-    const clients = getClients(this.context.credentials.aws, inputs.region)
+    const clients = getClients(this.context.credentials.aws)
 
     this.context.debug(`Formatting domains and identifying cloud services being used.`)
     const domains = prepareDomains(inputs)
@@ -38,33 +46,34 @@ class Domain extends Component {
     this.context.debug(`Getting the Hosted Zone ID for the domain ${inputs.domain}.`)
     const domainHostedZoneId = await getDomainHostedZoneId(clients.route53, inputs.domain)
 
-    // Get or Create an AWS ACM Certificate
+    // Get AWS ACM Certificate by ARN
     this.context.debug(`Checking if an AWS ACM Certificate already exists.`)
     let certificate
     if (this.state.awsAcmCertificateArn) {
       try {
         certificate = await describeCertificateByArn(clients.acm, this.state.awsAcmCertificateArn)
+        this.context.debug(`AWS ACM Certificate already exists.`)
       } catch(error) {
         if (error.code === 'ResourceNotFoundException') {
           this.context.debug(`Couldn't find Certificate based on ARN: ${this.state.awsAcmCertificateArn}.`)
-          this.context.debug(`Searching for an AWS ACM Certificate based on the domain: ${inputs.domain}.`)
-          let certificateArn = await getCertificateArnByDomain(clients.acm, inputs.domain)
-          if (certificateArn) {
-            this.state.awsAcmCertificateArn = certificateArn
-            await this.save()
-            certificate = await describeCertificateByArn(clients.acm, this.state.awsAcmCertificateArn)
-          } else {
-            this.context.debug(`Couldn't find an AWS ACM Certificate based on the domain: ${inputs.domain}.`)
-            this.context.debug(`Creating a new AWS ACM Certificate for the domain: ${inputs.domain}.`)
-            certificate = await createCertificate(clients.acm, inputs.domain)
-            this.state.awsAcmCertificateArn = certificate.CertificateArn
-            await this.save()
-            certificate = await describeCertificateByArn(clients.acm, this.state.awsAcmCertificateArn)
-          }
         } else {
           throw new Error(error)
         }
       }
+    }
+
+    // Get AWS ACM Certificate by Domain or Create one
+    if (!certificate) {
+      this.context.debug(`Searching for an AWS ACM Certificate based on the domain: ${inputs.domain}.`)
+      let certificateArn = await getCertificateArnByDomain(clients.acm, inputs.domain)
+      if (!certificateArn) {
+        this.context.debug(`No existing AWS ACM Certificates found for the domain: ${inputs.domain}.`)
+        this.context.debug(`Creating a new AWS ACM Certificate for the domain: ${inputs.domain}.`)
+        certificate = await createCertificate(clients.acm, inputs.domain)
+      }
+      certificate = await describeCertificateByArn(clients.acm, certificateArn)
+      this.state.awsAcmCertificateArn = certificate.CertificateArn
+      await this.save()
     }
 
     this.context.debug(`Checking the status of AWS ACM Certificate.`)
@@ -76,7 +85,7 @@ class Domain extends Component {
     }
 
     if (certificate.Status !== 'ISSUED' && certificate.Status !== 'PENDING_VALIDATION') {
-      // TODO: Should we delete the old one for the user or simply create a new one in this scenario?
+      // TODO: Should we auto-create a new one in this scenario?
       throw new Error(`Your AWS ACM Certificate for the domain "${inputs.domain}" has an unsupported status of: "${certificate.Status}".  Please remove it manually and deploy again.`)
     }
 
@@ -85,7 +94,7 @@ class Domain extends Component {
 
     // Setting up domains for different services
     for (const domainConfig of domains) {
-      if (domainConfig.type === 'awsS3') {
+      if (domainConfig.type === 'awsS3Website') {
         this.context.debug(`Configuring domain "${domainConfig.domain}" for S3 Bucket Website`)
 
         this.state.dns[domainConfig.domain] = this.state.dns[domainConfig.domain] || {}
@@ -120,10 +129,12 @@ class Domain extends Component {
           this.state.dns[domainConfig.domain].awsCfDistributionArn = distribution.distributionArn
           this.state.dns[domainConfig.domain].awsCfDistributionUrl = distribution.distributionUrl
           await this.save()
-          this.context.debug(`Created new AWS Cloudfront Distribution for "${domainConfig.domain}"`)
+          this.context.debug(`Created new AWS Cloudfront Distribution for "${this.state.dns[domainConfig.domain].awsCfDistributionUrl}"`)
         }
 
-        // If distribution exists already, invalidate index.html file
+        this.context.debug(`Using AWS Cloudfront Distribution with URL: "${domainConfig.domain}"`)
+
+        // If distribution exists already, invalidate index.html file, so that the site reloads
         if (exists) {
           this.context.debug(`AWS Cloudfront Distribution already exists for "${domainConfig.domain}"`)
           this.context.debug(`Invalidating "index.html" of AWS Cloudfront Distribution for "${domainConfig.domain}".`)
@@ -146,13 +157,50 @@ class Domain extends Component {
 
       // TODO: Remove unused domains that are kept in state
     }
+
+    const outputs = {}
+    let hasRoot = false
+    outputs.domains = domains.map((domainConfig) => {
+      if (domainConfig.root) hasRoot = true
+      return `https://${domainConfig.domain}`
+    })
+
+    if (hasRoot) outputs.domains.unshift(`https://www.${this.state.domain}`)
+
+    return outputs
   }
 
   /**
    * Remove
    */
 
-  async remove() {}
+  async remove() {
+    this.context.status('Deploying')
+    this.context.debug(`Starting Domain component removal.`)
+
+    // Get AWS SDK Clients
+    const clients = getClients(this.context.credentials.aws)
+
+    this.context.debug(`Getting the Hosted Zone ID for the domain ${this.state.domain}.`)
+    const domainHostedZoneId = await getDomainHostedZoneId(
+      clients.route53,
+      this.state.domain
+    )
+
+    for (const domainState in this.state.dns) {
+
+      if (domainState.type === 'awsS3Website') {
+        await removeAwsS3WebsiteResources(
+          clients.route53,
+          clients.cf,
+          domainHostedZoneId,
+          this.state.dns[domainState].domain,
+          this.state.dns[domainState].awsCfDistributionId,
+          this.state.dns[domainState].awsCfDistributionUrl,
+        )
+      }
+    }
+  }
 }
 
 module.exports = Domain
