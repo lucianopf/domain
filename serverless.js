@@ -30,6 +30,7 @@ class Domain extends Component {
 
     this.context.debug(`Validating inputs.`)
     inputs.region = inputs.region || 'us-east-1'
+
     if (!inputs.domain) {
       throw Error(`"domain" is a required input.`)
     }
@@ -42,6 +43,7 @@ class Domain extends Component {
 
     this.context.debug(`Formatting domains and identifying cloud services being used.`)
     const subdomains = prepareSubdomains(inputs)
+    this.state.region = inputs.region
     this.state.domain = inputs.domain
     this.state.subdomains = subdomains
     await this.save()
@@ -164,7 +166,7 @@ class Domain extends Component {
     this.context.debug(`Starting Domain component removal.`)
 
     // Get AWS SDK Clients
-    const clients = getClients(this.context.credentials.aws)
+    const clients = getClients(this.context.credentials.aws, this.state.region)
 
     this.context.debug(`Getting the Hosted Zone ID for the domain ${this.state.domain}.`)
     const domainHostedZoneId = await getDomainHostedZoneId(clients.route53, this.state.domain)
