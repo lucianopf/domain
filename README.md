@@ -13,8 +13,8 @@ domain:
   component: '@serverless/domain'
   inputs:
     domain: mywebsite.com
-    dns:
-      $: ${websiteComponentInstance}
+    subdomains:
+      www: ${websiteComponentInstance}
       api: ${backendComponentInstance}
       admin: ${anotherWebsiteComponentInstance}
 
