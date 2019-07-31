@@ -72,10 +72,18 @@ const getOutdatedDomains = (inputs, state) => {
     return state
   }
 
-  for (const domain of Object.keys(state.dns)) {
-    if (!inputs.dns[domain]) {
+  const outdatedDomains = {
+    domain: state.domain,
+    subdomains: []
+  }
+
+  for (const domain of state.subdomains) {
+    if (!inputs.subdomains[domain.domain]) {
+      outdatedDomains.push(domain)
     }
   }
+
+  return outdatedDomains
 }
 
 /**
@@ -724,6 +732,7 @@ const getApiDomainName = async (apig, domain) => {
     }
   }
 }
+
 /**
  * Exports
  */
@@ -731,6 +740,7 @@ const getApiDomainName = async (apig, domain) => {
 module.exports = {
   getClients,
   prepareSubdomains,
+  getOutdatedDomains,
   describeCertificateByArn,
   getCertificateArnByDomain,
   createCertificate,

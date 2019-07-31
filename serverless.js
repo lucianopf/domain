@@ -188,10 +188,10 @@ class Domain extends Component {
             distribution.url
           )
 
-          if (domainState.domain.startsWith('wwww')) {
+          if (domainState.domain.startsWith('www')) {
             await removeWebsiteDomainDnsRecords(
               clients.route53,
-              domainState.domain.repalce('www.', ''), // it'll move on if it doesn't exist
+              domainState.domain.replace('www.', ''), // it'll move on if it doesn't exist
               domainHostedZoneId,
               distribution.url
             )
