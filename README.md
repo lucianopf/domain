@@ -12,6 +12,7 @@ Easily provision custom domains for:
 domain:
   component: '@serverless/domain'
   inputs:
+    privateZone: false
     domain: mywebsite.com
     subdomains:
       www: ${websiteComponentInstance}
