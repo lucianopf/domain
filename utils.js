@@ -390,7 +390,7 @@ const getCloudFrontDistributionByDomain = async (cf, domain) => {
       id: distribution.Id,
       url: distribution.DomainName,
       origins: distribution.Origins.Items.map((origin) => origin.DomainName),
-      errorPages: distribution.CustomErrorResponses.Quantity ? true : false
+      errorPages: distribution.CustomErrorResponses.Quantity === 2 ? true : false
     }
   }
 
@@ -524,10 +524,16 @@ const createCloudfrontDistribution = async (cf, subdomain, certificateArn) => {
         Items: []
       },
       CustomErrorResponses: {
-        Quantity: 1,
+        Quantity: 2,
         Items: [
           {
             ErrorCode: 404,
+            ErrorCachingMinTTL: 300,
+            ResponseCode: '200',
+            ResponsePagePath: '/index.html'
+          },
+          {
+            ErrorCode: 403,
             ErrorCachingMinTTL: 300,
             ResponseCode: '200',
             ResponsePagePath: '/index.html'
@@ -598,11 +604,18 @@ const updateCloudfrontDistribution = async (cf, subdomain, distributionId) => {
   params.Id = distributionId
 
   // 5. then make our changes
+  // todo maybe we should add ALL error codes returned from CloudFront/S3?!
   params.DistributionConfig.CustomErrorResponses = {
-    Quantity: 1,
+    Quantity: 2,
     Items: [
       {
         ErrorCode: 404,
+        ErrorCachingMinTTL: 300,
+        ResponseCode: '200',
+        ResponsePagePath: '/index.html'
+      },
+      {
+        ErrorCode: 403,
         ErrorCachingMinTTL: 300,
         ResponseCode: '200',
         ResponsePagePath: '/index.html'
