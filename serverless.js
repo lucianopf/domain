@@ -102,7 +102,10 @@ class Domain extends Component {
             subdomain,
             certificate.CertificateArn
           )
-        } else if (!distribution.origins.includes(`${subdomain.s3BucketName}.s3.amazonaws.com`)) {
+        } else if (
+          !distribution.origins.includes(`${subdomain.s3BucketName}.s3.amazonaws.com`) ||
+          !distribution.errorPages
+        ) {
           this.context.debug(`Updating distribution "${distribution.url}".`)
           distribution = await updateCloudfrontDistribution(clients.cf, subdomain, distribution.id)
         }

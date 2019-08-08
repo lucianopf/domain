@@ -389,7 +389,8 @@ const getCloudFrontDistributionByDomain = async (cf, domain) => {
       arn: distribution.ARN,
       id: distribution.Id,
       url: distribution.DomainName,
-      origins: distribution.Origins.Items.map((origin) => origin.DomainName)
+      origins: distribution.Origins.Items.map((origin) => origin.DomainName),
+      errorPages: distribution.CustomErrorResponses.Quantity ? true : false
     }
   }
 
@@ -523,8 +524,15 @@ const createCloudfrontDistribution = async (cf, subdomain, certificateArn) => {
         Items: []
       },
       CustomErrorResponses: {
-        Quantity: 0,
-        Items: []
+        Quantity: 1,
+        Items: [
+          {
+            ErrorCode: 404,
+            ErrorCachingMinTTL: 300,
+            ResponseCode: '200',
+            ResponsePagePath: '/index.html'
+          }
+        ]
       },
       Comment: '',
       Logging: {
@@ -590,6 +598,17 @@ const updateCloudfrontDistribution = async (cf, subdomain, distributionId) => {
   params.Id = distributionId
 
   // 5. then make our changes
+  params.DistributionConfig.CustomErrorResponses = {
+    Quantity: 1,
+    Items: [
+      {
+        ErrorCode: 404,
+        ErrorCachingMinTTL: 300,
+        ResponseCode: '200',
+        ResponsePagePath: '/index.html'
+      }
+    ]
+  }
   params.DistributionConfig.Origins.Items = [
     {
       Id: `S3-${subdomain.s3BucketName}`,
