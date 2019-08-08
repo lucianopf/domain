@@ -93,12 +93,12 @@ const getOutdatedDomains = (inputs, state) => {
  * - These don't need to be created and SHOULD NOT be modified.
  */
 
-const getDomainHostedZoneId = async (route53, domain) => {
+const getDomainHostedZoneId = async (route53, domain, privateZone) => {
   const hostedZonesRes = await route53.listHostedZonesByName().promise()
 
   const hostedZone = hostedZonesRes.HostedZones.find(
     // Name has a period at the end, so we're using includes rather than equals
-    (zone) => zone.Name.includes(domain)
+    (zone) => zone.Config.PrivateZone === privateZone && zone.Name.includes(domain)
   )
 
   if (!hostedZone) {

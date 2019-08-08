@@ -30,6 +30,7 @@ class Domain extends Component {
 
     this.context.debug(`Validating inputs.`)
     inputs.region = inputs.region || 'us-east-1'
+    inputs.privateZone = inputs.privateZone || false
 
     if (!inputs.domain) {
       throw Error(`"domain" is a required input.`)
@@ -44,12 +45,17 @@ class Domain extends Component {
     this.context.debug(`Formatting domains and identifying cloud services being used.`)
     const subdomains = prepareSubdomains(inputs)
     this.state.region = inputs.region
+    this.state.privateZone = inputs.privateZone
     this.state.domain = inputs.domain
     this.state.subdomains = subdomains
     await this.save()
 
     this.context.debug(`Getting the Hosted Zone ID for the domain ${inputs.domain}.`)
-    const domainHostedZoneId = await getDomainHostedZoneId(clients.route53, inputs.domain)
+    const domainHostedZoneId = await getDomainHostedZoneId(
+      clients.route53,
+      inputs.domain,
+      inputs.privateZone
+    )
 
     this.context.debug(
       `Searching for an AWS ACM Certificate based on the domain: ${inputs.domain}.`
@@ -172,7 +178,11 @@ class Domain extends Component {
     const clients = getClients(this.context.credentials.aws, this.state.region)
 
     this.context.debug(`Getting the Hosted Zone ID for the domain ${this.state.domain}.`)
-    const domainHostedZoneId = await getDomainHostedZoneId(clients.route53, this.state.domain)
+    const domainHostedZoneId = await getDomainHostedZoneId(
+      clients.route53,
+      this.state.domain,
+      this.state.privateZone
+    )
 
     for (const subdomain in this.state.subdomains) {
       const domainState = this.state.subdomains[subdomain]
