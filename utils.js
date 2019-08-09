@@ -660,7 +660,7 @@ const invalidateCloudfrontDistribution = async (cf, distributionId) => {
       CallerReference: String(Date.now()),
       Paths: {
         Quantity: 1,
-        Items: ['/index.html']
+        Items: ['/*']
       }
     }
   }
